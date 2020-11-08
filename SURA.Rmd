@@ -1,0 +1,1052 @@
+---
+title: "SURA Project"
+authors: "Michael Lim, Alvin Pan"
+Andrew IDs: "mlim3, qpan"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab
+---
+
+
+```{r wrap-hook,echo=FALSE}
+library(knitr)
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+```
+
+---
+
+```{r linewidth=80}
+suppressMessages(suppressWarnings(library(tidyverse)))
+library(tidyverse)
+library(tidytext)
+library(stringr)
+library(caret)      # model evaluation
+library(tm)
+library(glmnet)
+```
+
+```{r linewidth=80}
+library(text2vec)     # NLP tools
+library(xgboost)      # XGBoost implementation
+library(textstem)     # word lemmatization
+```
+```{r}
+library(randomForest)
+library(e1071)
+library(neuralnet)
+library(naivebayes)
+```
+
+
+```{r}
+library(qdap)
+library(dplyr)
+library(tm)
+library(wordcloud)
+library(plotrix)
+library(dendextend)
+library(ggplot2)
+library(ggthemes)
+library(RWeka)
+```
+
+---
+
+#Read Data
+```{r linewidth=80}
+
+example = readLines('SURA_trials_pubmed.txt')
+
+example1 = example[example != '']
+sub_ex = substr(example1, start = 1, stop = 4)
+unique(sub_ex)
+labels = unique(sub_ex)
+# WILL RUN INTO ERRORS EVENTUALLY (NOT FUTURE PROOF), labels are manually created by looking at unique values
+#labels = c("PMID", "OWN ", "STAT", "DCOM", "LR  ", "IS  ", "VI  ", "IP  ", "DP  ", "TI  ", "PG  ", "LID ", "AB  ", "CI  ", "FAU ", "AU  ", "AUID", "AD  ", "LA  ", "PT  ", "DEP ", "PL  ", "TA  ", "JT  ", "JID ", "SB  ", "MH  ", "OTO ", "OT  ", "EDAT", "MHDA", "CRDT", "PHST", "AID ", "PST ", "SO  ", "SI  ", "PMC ", "RN  ", "GR  ", "COIS", "MID ", "CIN ", "EIN ", "CN  ", "RIN ")
+
+
+
+
+# initialize values for looping
+mat = matrix(data = rep(''), ncol = length(labels))
+colnames(mat) = labels
+
+j = 1                # row number
+i = 2                # skip first line
+prev_lab = "PMID"    # first label is always 'PMID'
+
+while(i <= length(example)) {
+  label = substr(example[i], start = 1, stop = 4) # first 4 characters contains label
+  if(label == "    ") { # case where line continues
+    mat[j, prev_lab] = paste(mat[j, prev_lab], substr(example[i], start = 7, stop = nchar(example[i])), sep = ' ')
+  } else if(label == "" | i == length(example)) { # case where we move onto the next study
+    mat = rbind(mat, rep('', length(labels)))
+    j = j + 1
+  } else if(mat[j, label] == '') { # case where there is no info already in space
+    mat[j, label] = substr(example[i], start = 7, stop = nchar(example[i]))
+  } else { # case where there is already info already in space
+    mat[j, label] = paste(mat[j, label], substr(example[i], start = 7, stop = nchar(example[i])), sep = ' ##o0## ')
+  }
+  if(label != "    ") { # change previous label if line was not continued
+    prev_lab = label
+  }
+  i = i + 1
+}
+
+# construct data frame
+df_trials = data.frame(mat)
+
+
+example = readLines('SURA_not-trial_pubmed.txt')
+
+example1 = example[example != '']
+sub_ex = substr(example1, start = 1, stop = 4)
+unique(sub_ex)
+
+
+labels = unique(sub_ex)
+
+# initialize values for looping
+mat = matrix(data = rep(''), ncol = length(labels))
+colnames(mat) = labels
+
+j = 1                # row number
+i = 2                # skip first line
+prev_lab = "PMID"    # first label is always 'PMID'
+
+while(i <= length(example)) {
+  label = substr(example[i], start = 1, stop = 4) # first 4 characters contains label
+  if(label == "    ") { # case where line continues
+    mat[j, prev_lab] = paste(mat[j, prev_lab], substr(example[i], start = 7, stop = nchar(example[i])), sep = ' ')
+  } else if(label == "" | i == length(example)) { # case where we move onto the next study
+    mat = rbind(mat, rep('', length(labels)))
+    j = j + 1
+  } else if(mat[j, label] == '') { # case where there is no info already in space
+    mat[j, label] = substr(example[i], start = 7, stop = nchar(example[i]))
+  } else { # case where there is already info already in space
+    mat[j, label] = paste(mat[j, label], substr(example[i], start = 7, stop = nchar(example[i])), sep = ' ##o0## ')
+  }
+  if(label != "    ") { # change previous label if line was not continued
+    prev_lab = label
+  }
+  i = i + 1
+}
+
+# construct data frame
+df_non_trials = data.frame(mat)
+
+# https://www.google.com/search?client=safari&rls=en&q=support+vector+machine&ie=UTF-8&oe=UTF-8
+
+
+```
+
+
+
+
+add label
+```{r}
+df_trials$L = 1
+df_non_trials$L = 0
+```
+
+rename columns
+```{r}
+colnames(df_trials)[names(df_trials)=="AB.."] <- "abstract"
+colnames(df_trials)[names(df_trials)=="TI.."] <- "title"
+colnames(df_non_trials)[names(df_non_trials)=="AB.."] <- "abstract"
+colnames(df_non_trials)[names(df_non_trials)=="TI.."] <- "title"
+#df_non_trials$title
+```
+
+```{r}
+#(optional) add title to abstract rowwise
+df_trials$abstract = paste(df_trials$title, df_trials$abstract, sep = ' ')
+
+df_non_trials$abstract = paste(df_non_trials$title, df_non_trials$abstract, sep = ' ')
+```
+
+```{r}
+dim(df_trials)
+```
+```{r}
+dim(df_non_trials)
+```
+
+
+
+```{r}
+head(df_non_trials)
+```
+
+
+```{r}
+clean.texts <- function(text) {
+  text = removeNumbers(text)
+  text = tolower(text)
+  text = bracketX(text)
+  text = removePunctuation(text)
+  text = stripWhitespace(text)
+  text = removeWords(text, stopwords('en'))
+  return(text)
+}
+```
+
+clean data
+```{r}
+df_trials$title = clean.texts(df_trials$title)
+df_trials$abstract = clean.texts(df_trials$abstract)
+df_non_trials$title = clean.texts(df_non_trials$title)
+df_non_trials$abstract = clean.texts(df_non_trials$abstract)
+```
+
+---
+
+
+```{r}
+fact2num <- function(x) {
+  return (as.numeric(as.character(x)))
+}
+```
+
+
+```{r}
+get.pred.error <- function(model, test, method = NULL) {
+  if (is.null(method)) {
+    test.pred = predict(model, newdata = test)
+  } else if (method == "DF"){
+    test.pred = as.numeric(as.character(predict(model, newdata = test)))
+    label = as.numeric(as.character(test$L))
+    return (mean(test.pred != label))
+  } else if (method == "NB") {
+    test.pred = ifelse(predict(model, newdata = test, type = "raw")[,2]>0.5, 1, 0)
+  } else if (method == "SVM") {
+    test.pred = ifelse(predict(model, newdata = test)>0.5, 1, 0)
+  } else { # lasso
+    x = model.matrix(L~. , test)[,-1]
+    test.pred = ifelse(predict(model, newx = x)>0.5, 1, 0)
+  }
+  return (mean(test.pred != test$L))
+}
+```
+
+```{r}
+nn.pred.error <- function(nn, test) {
+  nn.res = compute(nn, test)
+  nn.probs = nn.res$net.result
+  nn.pred <- ifelse(nn.probs>0.5, 1, 0)
+  return (mean(nn.pred != test$L))
+}
+```
+
+---
+
+# Convert the title attribute to bag of words
+```{r title-bag-of-words}
+# http://uc-r.github.io/creating-text-features
+
+test_t = df_trials %>%
+  select(PMID, title, L)
+
+test_nt = df_non_trials %>%
+  select(PMID, title, L)
+
+# combine data frames
+test_df = rbind(test_t, test_nt)
+
+test_df[test_df == ""] = NA
+test_df = test_df[complete.cases(test_df), ]
+```
+
+```{r}
+dim(test_df)
+```
+
+
+```{r}
+# get list of words and their counts
+words <- test_df %>%
+   unnest_tokens(output = word, input = title) %>%
+   filter(#!str_detect(word, "^[0-9]*$"),
+    #!str_detect(word, pattern = "[[:digit:]]"), # removes any words with numeric digits
+    #!str_detect(word, pattern = "[[:punct:]]"), # removes any remaining punctuations
+    #!str_detect(word, pattern = "(.)\\1{2,}"),  # removes any words with 3 or more repeated letters
+    !str_detect(word, pattern = "\\b(.)\\b")    # removes any remaining single letter words
+    ) %>%
+  count(word) %>%
+  # filter(n >= 2) %>% # filter for words used 2 or more times
+  pull(word)
+
+word_matrix <- test_df %>%
+  unnest_tokens(output = word, input = title) %>%
+  filter(word %in% words) %>%     # filter for only words in the wordlist
+  count(PMID, word) %>%                 # count word useage by ID
+  spread(word, n) %>%                # convert to wide format
+  map_df(replace_na, 0)               # replace NAs with 0
+
+word_matrix_df <- test_df %>%
+  inner_join(word_matrix, by = 'PMID') %>%   # join data sets
+  select(-c('title', 'PMID')) 
+
+```
+
+
+
+```{r}
+colnames(word_matrix_df)[colnames(word_matrix_df) == "function"] <- "funct"
+colnames(word_matrix_df)[colnames(word_matrix_df) == "next"] <- "nex"
+```
+
+
+```{r}
+title.bwords.df = word_matrix_df
+title.bwords.df[title.bwords.df != 0] <- 1
+for (i in 1:ncol(title.bwords.df)) {
+  title.bwords.df[,i] <- as.factor(title.bwords.df[,i])
+}
+head(title.bwords.df)
+```
+
+
+
+```{r}
+dim(title.bwords.df)
+```
+
+```{r}
+n = dim(title.bwords.df)[1]
+```
+
+
+# Implement decision forest, svm, naive bayes and neural networks to the bag of words dataset
+```{r decision-forest train}
+title.dforest = randomForest(L ~ ., data = title.bwords.df)
+```
+
+
+
+```{r}
+title.dforest.train.error = get.pred.error(title.dforest, title.bwords.df, "DF")
+title.dforest.train.error
+```
+DF train error: 0.01013421
+
+
+```{r}
+title.bwords.df[,1] = fact2num(title.bwords.df[,1]) 
+```
+
+
+
+
+
+```{r SVM}
+title.svm = svm(L ~ ., data = title.bwords.df, kernel = "linear", cost = 10, scale = FALSE)
+
+```
+
+```{r}
+title.svm.train.error = get.pred.error(title.svm, title.bwords.df, "SVM")
+title.svm.train.error
+```
+svm train error is 0
+
+
+
+
+
+```{r NB}
+title.nb = naiveBayes(L ~ ., data = title.bwords.df, laplace = 3)
+```
+```{r}
+title.nb.train.error = get.pred.error(title.nb, title.bwords.df, "NB")
+title.nb.train.error
+```
+naive bayes train error is 0.08326486
+
+
+
+
+```{r}
+# want to try 4 models
+title.err.mat = matrix(rep(0,5*5), ncol = 5)
+
+set.seed(10)
+
+if (n %% 5 == 0) {
+  samp <- sample(rep(1:5, n%/%5), replace = FALSE)
+} else {
+  samp <- sample(c(rep(1:5, n%/%5), 1:(n %% 5)), replace = FALSE)
+}
+```
+
+
+```{r title DF CV}
+title.bwords.df = word_matrix_df
+colnames(title.bwords.df)[colnames(title.bwords.df) == "function"] <- "funct"
+colnames(title.bwords.df)[colnames(title.bwords.df) == "next"] <- "nex"
+for (i in 1:ncol(title.bwords.df)) {
+  title.bwords.df[,i] <- as.factor(title.bwords.df[,i])
+}
+
+
+for (k in 1:5) {
+  testd <- title.bwords.df[samp == k, ]
+  traind <- title.bwords.df[!(samp == k), ]
+  m1 = randomForest(L ~ ., data = traind)
+  
+  title.err.mat[1,k] = get.pred.error(m1, testd, "DF")
+}
+```
+
+```{r}
+apply(title.err.mat, 1, mean)
+```
+
+
+
+```{r title SVM&NB CV}
+title.bwords.df[,1] = fact2num(title.bwords.df[,1])
+
+for (k in 1:5) {
+  testd <- title.bwords.df[samp == k, ]
+  traind <- title.bwords.df[!(samp == k), ]
+  m2 = svm(L ~ ., data = traind, kernel = "linear", cost = 10, scale = FALSE)
+  m3 = naiveBayes(L ~ ., data = traind, laplace = 3)
+  
+  title.err.mat[2,k] = get.pred.error(m2, testd, "SVM")
+  title.err.mat[3,k] = get.pred.error(m3, testd, "NB")
+}
+```
+
+
+```{r}
+title.err.mat
+```
+```{r}
+apply(title.err.mat, 1, mean)
+```
+0.06108202 0.03834679 0.08327006 0.00000000 0.00000000
+
+```{r}
+apply(title.err.mat, 1, sd)
+```
+0.011823184 0.005656644 0.014667419 0.000000000 0.000000000
+
+
+
+
+```{r}
+for (i in 2:ncol(title.bwords.df)) {
+  title.bwords.df[,i] <- fact2num(title.bwords.df[,i])
+}
+```
+
+
+
+```{r NN}
+hidden_layers = c(400, 200, 100)
+ns = colnames(title.bwords.df)
+s = paste("L ~", paste(ns[c(-1)], collapse = " + "))
+nn.fun <- as.formula(s)
+```
+
+```{r}
+title.nn=neuralnet(nn.fun, data=title.bwords.df, hidden=hidden_layers, act.fct = "logistic", linear.output = FALSE)
+
+```
+
+```{r}
+title.nn.train.error = nn.pred.error(title.nn, title.bwords.df)
+title.nn.train.error
+```
+NN train error: 0.08326486
+
+
+
+```{r lasso}
+set.seed(10)
+x = model.matrix(L~. , title.bwords.df)[,-1]
+#lambda_seq <- 10^seq(2, -2, by = -.1)
+  
+#cv.lasso <- cv.glmnet(x, title.bwords.df$L, alpha = 1, family = "binomial")
+
+#lam = cv.lasso$lambda.1se
+title.lasso <- glmnet(x, title.bwords.df$L, alpha = 1, family = "binomial")
+```
+
+```{r}
+title.lasso.train.error = get.pred.error(title.lasso, title.bwords.df, "lasso")
+title.lasso.train.error
+```
+Train error = 0.04009586
+
+
+```{r title NN&lasso CV}
+set.seed(10)
+for (k in 1:5) {
+  testd <- title.bwords.df[samp == k, ]
+  traind <- title.bwords.df[!(samp == k), ]
+  #m4 = neuralnet(nn.fun, data=title.bwords.df, hidden=hidden_layers, act.fct = "logistic", linear.output = FALSE)
+  x = model.matrix(L~. , traind)[,-1]
+  m5 = glmnet(x, traind$L, alpha = 1, family = "binomial")
+
+
+  #title.err.mat[4,k] = nn.pred.error(m4, testd)
+  title.err.mat[5,k] = get.pred.error(m5, testd, 'lasso')
+  
+}
+```
+
+```{r}
+title.err.mat
+```
+
+
+
+
+```{r}
+title.err.means = apply(title.err.mat, 1, mean)
+title.err.means
+```
+0.06108202 0.03834679 0.08327006 0.08327006 0.06194816
+
+```{r}
+title.err.sds = apply(title.err.mat, 1, sd)
+title.err.sds
+```
+
+DF:  mean = 0.05218292 sd = 0.007799733
+svm: mean = 0.03834679 sd = 0.002182407
+NB:  mean = 0.05856719 sd = 0.009420572
+NN:  mean = 0.08437856 sd = 0.008710117
+lasso: mean = 0.06194816, sd = 0.01263632
+
+
+---
+
+#Convert abstract attribute to bag of bigrams
+
+
+```{r abstract-bi grams}
+# http://uc-r.github.io/creating-text-features
+
+test_t = df_trials %>%
+  select(PMID, abstract, L)
+
+test_nt = df_non_trials %>%
+  select(PMID, abstract, L)
+```
+
+
+```{r}
+# combine data frames
+test_df = rbind(test_t, test_nt)
+
+test_df[test_df == ''] = NA
+test_df = test_df[complete.cases(test_df), ]
+```
+
+```{r}
+dim(test_df)
+```
+
+
+
+```{r}
+bigram_list = test_df %>%
+  unnest_tokens(bigram, "abstract", token = "ngrams", n = 2) %>%  
+  separate(bigram, c("word1", "word2"), sep = " ") %>%               
+  filter(
+    #!str_detect(word1, pattern = "[[:digit:]]"), # removes any words with numeric digits
+    #!str_detect(word2, pattern = "[[:digit:]]"),
+    #!str_detect(word1, pattern = "[[:punct:]]"), # removes any remaining punctuations
+    #!str_detect(word2, pattern = "[[:punct:]]"),
+    !str_detect(word1, pattern = "(.)\\1{2,}"),  # removes any words with 3 or more repeated letters
+    !str_detect(word2, pattern = "(.)\\1{2,}"),
+    #!str_detect(word3, pattern = "(.)\\1{2,}"),
+    !str_detect(word1, pattern = "\\b(.)\\b"),   # removes any remaining single letter words
+    !str_detect(word2, pattern = "\\b(.)\\b"),
+    #!str_detect(word3, pattern = "\\b(.)\\b")
+    ) %>%
+  unite("bigram", c(word1, word2), sep = " ") %>%
+  count(bigram) %>%
+  filter(n >= 8) %>% # filter for bi-grams used 8 or more times
+  pull(bigram)
+```
+
+```{r}
+ngram_features <- test_df %>%
+  unnest_tokens(bigram, "abstract", token = "ngrams", n = 2) %>%
+  filter(bigram %in% bigram_list) %>%    # filter for only bi-grams in the ngram_list
+  count(PMID, bigram) %>%                 # count bi-gram useage by customer ID
+  spread(bigram, n) %>%                 # convert to wide format
+  map_df(replace_na, 0)   
+```
+
+```{r}
+bigram_matrix_df <- test_df %>%
+  inner_join(ngram_features, by = 'PMID') %>%   # join data sets
+  select(-c('abstract', 'PMID'))
+```
+
+
+```{r}
+colnames(bigram_matrix_df) <- sub(' ', '.', colnames(bigram_matrix_df))
+```
+
+
+
+```{r delete PMID}
+ab.bwords.df = bigram_matrix_df
+ab.bwords.df[ab.bwords.df != 0] <- 1
+for (i in 1:ncol(ab.bwords.df)) {
+  ab.bwords.df[,i] <- as.factor(ab.bwords.df[,i])
+}
+
+head(ab.bwords.df)
+```
+
+
+
+```{r}
+n = dim(ab.bwords.df)[1]
+```
+
+
+```{r decision-forest train}
+ab.dforest = randomForest(L ~ ., data = ab.bwords.df)
+```
+```{r}
+ab.dforest.train.error = get.pred.error(ab.dforest, ab.bwords.df, "DF")
+ab.dforest.train.error
+```
+DF train error: 0.01013318
+
+
+```{r}
+ab.bwords.df[,1] <- fact2num(ab.bwords.df[,1])
+```
+
+
+
+```{r SVM}
+ab.svm = svm(L ~ ., data = ab.bwords.df, kernel = "linear", cost = 10, scale = FALSE)
+
+```
+
+```{r}
+ab.svm.train.error = get.pred.error(ab.svm, ab.bwords.df, "SVM")
+ab.svm.train.error
+```
+SVM train error: 0
+
+```{r NB}
+ab.nb = naiveBayes(L ~ ., data = ab.bwords.df, laplace = 3)
+```
+```{r}
+ab.nb.train.error = get.pred.error(ab.nb, ab.bwords.df, "NB")
+ab.nb.train.error
+```
+NB train error: 0.0477707
+
+```{r}
+3454*0.048
+```
+
+
+```{r}
+ab.err.mat = matrix(rep(0,5*5), ncol = 5)
+```
+
+
+```{r abstract CV}
+set.seed(0)
+# want to try 4 models
+
+if (n %% 5 == 0) {
+  samp <- sample(rep(1:5, n%/%5), replace = FALSE)
+} else {
+  samp <- sample(c(rep(1:5, n%/%5), 1:(n %% 5)), replace = FALSE)
+}
+```
+
+```{r abstract DF CV}
+ab.bwords.df = bigram_matrix_df
+for (i in 1:ncol(ab.bwords.df)) {
+  ab.bwords.df[,i] <- as.factor(ab.bwords.df[,i])
+}
+
+for (k in 1:5) {
+  testd <- ab.bwords.df[samp == k, ]
+  traind <- ab.bwords.df[!(samp == k), ]
+  m1 = randomForest(L ~ ., data = traind)
+  #m2 = svm(L ~ ., data = traind, kernel = "linear", cost = 10, scale = FALSE)
+  #m3 = naiveBayes(L ~ ., data = traind, laplace = 3)
+  #m4 = neuralnet(label~., data=traind, hidden=5,act.fct = "logistic", linear.output = FALSE)
+  
+  ab.err.mat[1,k] = get.pred.error(m1, testd, "DF")
+  #ab.err.mat[2,k] = get.pred.error(m2, testd, "SVM")
+  #ab.err.mat[3,k] = get.pred.error(m3, testd, "NB")
+  #ab.err.mat[4,k] = nn.pred.error(m4, testd)
+}
+```
+
+```{r}
+ab.err.mat
+```
+
+
+```{r}
+ab.bwords.df[,1] <- fact2num(ab.bwords.df[,1])
+
+for (k in 1:5) {
+  testd <- ab.bwords.df[samp == k, ]
+  traind <- ab.bwords.df[!(samp == k), ]
+  m2 = svm(L ~ ., data = traind, kernel = "linear", cost = 10, scale = FALSE)
+  m3 = naiveBayes(L ~ ., data = traind, laplace = 3)
+  
+  ab.err.mat[2,k] = get.pred.error(m2, testd, "SVM")
+  ab.err.mat[3,k] = get.pred.error(m3, testd, "NB")
+  #ab.err.mat[4,k] = nn.pred.error(m4, testd)
+}
+```
+
+```{r}
+ab.err.mat
+```
+
+
+
+```{r}
+for (i in 2:ncol(ab.bwords.df)) {
+  ab.bwords.df[,i] <- fact2num(ab.bwords.df[,i])
+}
+```
+
+
+
+
+```{r NN}
+hidden_layers = c(500, 200, 100)
+ns = colnames(ab.bwords.df)
+s = paste("L ~", paste(ns[c(-1)], collapse = " + "))
+nn.fun <- as.formula(s)
+```
+```{r}
+ab.nn=neuralnet(nn.fun, data=ab.bwords.df, hidden=hidden_layers, act.fct = "logistic", err.fct = "sse", linear.output = FALSE)
+
+```
+```{r}
+ab.nn.train.error = nn.pred.error(ab.nn, ab.bwords.df)
+ab.nn.train.error
+```
+Train error = 0.0880139
+
+```{r}
+table(ab.bwords.df$L)
+```
+
+
+
+```{r lasso}
+set.seed(0)
+x = model.matrix(L~. , ab.bwords.df)[,-1]
+#lambda_seq <- 10^seq(2, -2, by = -.1)
+
+#set.seed(0)
+cv.lasso <- cv.glmnet(x, ab.bwords.df$L, alpha = 0, family = "binomial")
+```
+
+```{r}
+cv.lasso
+```
+
+```{r}
+coef(cv.lasso, cv.lasso$lambda.min)
+```
+
+
+```{r}
+ab.lasso <- glmnet(x, ab.bwords.df$L, alpha = 1, family = "binomial", lambda = cv.lasso$lambda.min)
+```
+
+
+
+```{r}
+ab.lasso.train.error = get.pred.error(ab.lasso, ab.bwords.df, "lasso")
+ab.lasso.train.error
+```
+
+```{r}
+text = "Pain sensitivity and skull/brain injury associated with cautery, cryosurgical and
+      caustic paste disbudding were evaluated in goat kids. Kids (reared for meat;
+      n=280) were randomly assigned to one of four treatments (n=70 per treatment): (1)
+      sham-handling (SHAM) or (2) cautery (CAUT), (3) cryosurgical (CRYO) or (4)
+      caustic paste (CASP) disbudding. A pain sensitivity test was carried out 15min
+      pre-treatment and 1h post-treatment. Skull/brain injury was assessed at
+      post-mortem examination. Kids with evidence of injury to the skull/brain, as well
+      as a random sample of kids (n=15 per treatment) without evidence of skull/brain
+      injury, were selected for histological examination of brain tissue. Average daily
+      gains (ADG) were calculated from body weight measurements taken 10min
+      pre-treatment and then at 2, 7 and 14days post-treatment as a measure of the
+      potential effects of pain or injury on growth. CASP and CRYO kids displayed
+      higher pain sensitivity post-treatment than CAUT or SHAM kids, suggesting that
+      they experienced more acute pain 1h post-treatment. One of 70 CAUT kids had a
+      perforated skull, but there was no histological evidence of brain injury in this 
+      animal; a further nine CAUT kids exhibited hyperaemia of the skull. The other
+      treatments did not result in injury to the skull/brain. There was no evidence of 
+      a difference in ADG across treatments. Caustic paste and cryosurgical disbudding 
+      resulted in greater acute pain sensitivity than cautery disbudding; however,
+      cautery disbudding has the potential to cause skull injury if performed
+      incorrectly."
+```
+
+```{r}
+dim(bigramFreq(text, ab.bwords.df))
+```
+
+```{r}
+temp.df = bigramFreq(text, ab.bwords.df)
+temp.df[2,] = 0
+```
+
+
+```{r}
+get.pred.error(ab.lasso, temp.df, "lasso")
+```
+
+
+```{r}
+set.seed(0)
+for (k in 1:5) {
+  testd <- ab.bwords.df[samp == k, ]
+  traind <- ab.bwords.df[!(samp == k), ]
+  m4 = neuralnet(nn.fun, data=traind, hidden=hidden_layers, act.fct = "logistic", linear.output = FALSE)
+  x = model.matrix(L~. , traind)[,-1]
+  m5 = glmnet(x, traind$L, alpha = 1, family = "binomial", lambda = lam)
+
+
+  ab.err.mat[4,k] = nn.pred.error(m4, testd)
+  ab.err.mat[5,k] = get.pred.error(m5, testd, 'lasso')
+  
+}
+```
+
+```{r}
+ab.err.mat
+```
+
+
+
+
+```{r}
+ab.err.means = apply(ab.err.mat, 1, mean)
+ab.err.means
+```
+
+```{r}
+ab.err.sds = apply(ab.err.mat, 1, sd)
+ab.err.sds
+```
+
+DF:    mean = 0.03184840, sd = 0.005425395
+SVM:   mean = 0.04516664, sd = 0.007629921
+NB:    mean = 0.08743094, sd = 0.009810298
+NN:    mean = 0.08800982, sd = 0.010216597
+lasso: mean = 0.08800982, sd = 0.010216597
+
+
+
+
+
+```{r}
+wordFreq <- function(text, all.df) {
+  words = strsplit(text, "\\W")[[1]]
+  words = words[words != ""] 
+  words = unique(words)
+  df = all.df[0,]
+  df[1,] = rep(0)
+  words[words == "function"] <- "funct"
+  words[words == "next"] <- "nex"
+  for (i in 1:length(words)) {
+    if (words[i] %in% names(df)) {
+      df[1, words[i]] = 1
+    }
+  }
+  return (df) 
+}
+```
+
+
+```{r}
+bigramFreq <- function(text, all.df) {
+  temp.df = data.frame(abstract=text)
+  temp.df = temp.df %>%
+  unnest_tokens(bigram, "abstract", token = "ngrams", n = 2)
+  bigrams = unique(temp.df$bigram)
+  bigrams = bigrams[bigrams != ""] 
+  df = all.df[0,]
+  df[1,] = rep(0)
+  bigrams <- sub(' ', '.', bigrams)
+  for (i in 1:length(bigrams)) {
+    if (bigrams[i] %in% names(df)) {
+      df[1, bigrams[i]] = 1
+    }
+  }
+  return (df) 
+}
+```
+
+
+
+
+```{r}
+SURA.predict <- function(all.df, model.name, input, trained.model=NULL, title=TRUE) {
+  cleaned.input = clean.texts(input)
+  if (title) {
+    test = wordFreq(cleaned.input, all.df)
+  } else {
+    test = bigramFreq(cleaned.input, all.df)
+  }
+  
+  model = trained.model
+  if (model.name == "DF") {
+    if (is.null(trained.model)) {
+      model = randomForest(L ~ ., data = all.df)
+    }
+    test.pred = fact2num(predict(model, newdata = test))
+  } else if (model.name == "SVM") {
+    all.df[,1] <- fact2num(all.df[,1])
+    test[,1] <- fact2num(test[,1])
+    if (is.null(trained.model)) {
+      model = svm(L ~ ., data = all.df, kernel = "linear", cost = 10, scale = FALSE)
+    }
+    test.pred = predict(model, newdata = test, type = "raw")
+  } else if (model.name == "NB") {
+    all.df[,1] <- fact2num(all.df[,1])
+    test[,1] <- fact2num(test[,1])
+    if (is.null(trained.model)) {
+      model = naiveBayes(L ~ ., data = all.df, laplace = 3)
+    }
+    test.pred = predict(model, newdata = test, type = "raw")
+  } else if (model.name == "NN") {
+    for (i in 1:ncol(all.df)) {
+      all.df[,i] <- fact2num(all.df[,i])
+    }
+    for (i in 1:ncol(test)) {
+      test[,i] <- fact2num(test[,i])
+    }
+    if (is.null(trained.model)) {
+      hidden_layers = c(400, 100, 100)
+      ns = colnames(all.df)
+      s = paste("L ~", paste(ns[c(-1)], collapse = " + "))
+      nn.fun <- as.formula(s)
+      model = neuralnet(nn.fun, data=all.df, hidden=hidden_layers, act.fct = "logistic", linear.output = FALSE)
+    }
+    test.pred = compute(model, test)$net.result
+    
+  } else { #lasso
+    for (i in 1:ncol(all.df)) {
+      all.df[,i] <- fact2num(all.df[,i])
+    }
+    for (i in 1:ncol(test)) {
+      test[,i] <- fact2num(test[,i])
+    }
+    if (is.null(trained.model)) {
+      set.seed(10)
+      x = model.matrix(L ~. , all.df)[,-1]
+      #lambda_seq <- 10^seq(2, -2, by = -.1)
+      cv.lasso <- cv.glmnet(x, all.df$L, alpha = 0.8, lambda = lambda_seq, nfolds = 5, family = "binomial")
+  
+      #lam = cv.lasso$lambda.min
+      model <- glmnet(x, all.df$L, alpha = 0.8, family = "binomial", lambda = cv.lasso$)
+    }
+    n = dim(test)[1]
+    test[n+1,] = rep(0)
+    x.test = model.matrix(L~. , test)[,-1]
+    test.pred = predict(model, newx = x.test)
+    #test.pred = ifelse(test.pred>0.5, 1, 0)
+  }
+  
+  return (test.pred)
+}
+```
+
+```{r set all variables to be factors}
+title.bwords.df = word_matrix_df
+title.bwords.df[title.bwords.df != 0] <- 1
+for (i in 1:ncol(title.bwords.df)) {
+  title.bwords.df[,i] <- as.factor(title.bwords.df[,i])
+}
+```
+
+```{r}
+ab.bwords.df = bigram_matrix_df
+ab.bwords.df[ab.bwords.df != 0] <- 1
+for (i in 1:ncol(ab.bwords.df)) {
+  ab.bwords.df[,i] <- as.factor(ab.bwords.df[,i])
+}
+```
+
+
+
+
+
+```{r}
+res = SURA.predict(title.bwords.df, "lasso", "A home-based mentored vegetable gardening intervention demonstrates feasibility
+      and improvements in physical activity and performance among breast cancer
+      survivors.", trained.model = title.lasso)
+
+mean(test.pred)
+```
+
+
+```{r}
+test.pred = SURA.predict(ab.bwords.df, "SVM", "The ingestion of insects has become a new trend in food science approximately   since 2013, when the Food and Agriculture Organization of the United Nations     (FAO) published a document entitled 'Edible Insects: Future Perspectives of Food      and Nutrition Security'. Since then, a growing number of researches relating     insects as a food source has emerged, however, little is known about the     composition of their nutrients. This review describes and compares the     nutritional composition, functionality and the bioactive compounds present in  different insects, as these have been shown to be a source of healthy food with    high protein content, significant amount of lipids, vitamins, minerals and      fibers, present in the form of chitin in the exoskeleton of the insects.     Additionally, the issues related to entomophagy and the possible risks that     should be taken into account when consuming insects are discussed.", trained.model = ab.svm, title = FALSE)
+```
+
+```{r}
+test.pred
+```
+
+
+```{r}
+table(title.bwords.df$L)
+```
+```{r}
+304/3651
+```
+
+
+```{r}
+df.elements <- function(df) {
+  return (unique(as.vector(as.matrix(df))))
+}
+```
+
+
+
+
+```{r}
+write.csv(ab.bwords.df, "ab.bwords.df.csv")
+```
+
+
+```{r}
+save.image(file='SURA.RData')
+```
+
